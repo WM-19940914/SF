@@ -1,15 +1,13 @@
 // ============================================
 // 삼성 출고가 관리 페이지
-// → DB에서 SET 상품 + 부품 목록 조회
-// → SET을 펼치면 부품 목록이 보임 (아코디언 스타일)
-// → 부품 출고가 인라인 수정 → DB에 저장
+// → 세트모델 클릭 시 아코디언으로 구성품 표시
+// → Supabase DB 연동 + 수정 기능
 // ============================================
 
 "use client";
 
 import { useState, useEffect } from "react";
-import { getProductSets, updateProductPrice, type ProductSet, type Product } from "@/lib/db";
-import { formatPrice } from "@/data/mock-data";
+import { createClient } from "@/lib/supabase/client";
 import {
   Table,
   TableBody,
@@ -18,384 +16,879 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ChevronDown, ChevronRight, Search, ListFilter, Loader2, Pencil, Trash2, Plus } from "lucide-react";
+import EditSetModal from "@/components/pricing/EditSetModal";
+import EditPartModal from "@/components/pricing/EditPartModal";
+import AddSetModal from "@/components/pricing/AddSetModal";
+import AddPartModal from "@/components/pricing/AddPartModal";
+import { Toast } from "@/components/ui/toast-simple";
+import { ConfirmModal } from "@/components/ui/confirm-modal";
+
+// Supabase 테이블 타입
+interface ProductSet {
+  id: string;
+  category: string;
+  cooling_type: string;
+  set_name: string;
+  set_model: string;
+  factory_price: number;
+  dc_rate: number;
+  sale_price: number;
+  note: string | null;
+  sort_order: number;
+}
+
+interface Product {
+  id: string;
+  set_id: string;
+  part_name: string;
+  model_name: string;
+  factory_price: number;
+  dc_rate: number;
+  sale_price: number;
+  is_material: boolean;
+  sort_order: number;
+}
+
+// 프론트엔드용 가공 데이터 타입
+interface PriceItem {
+  id: string;
+  구분: string;
+  타입: string;
+  품목명: string;
+  모델명: string;
+  출고가: number;
+  DC율: number;
+  판매가: number;
+  비고: string;
+  구성품: Part[];
+  // 원본 데이터 (수정용)
+  _raw: ProductSet;
+  _rawParts: Product[];
+}
+
+interface Part {
+  id: string;
+  품목명: string;
+  모델명: string;
+  출고가: number;
+  DC율: number;
+  판매가: number;
+  is_material: boolean;
+  _raw: Product;
+}
+
+// 가격 포맷팅
+function formatPrice(price: number): string {
+  if (!price) return "-";
+  return price.toLocaleString("ko-KR") + "원";
+}
 
 export default function SamsungPricePage() {
-  // SET 목록 (부품 포함)
-  const [sets, setSets] = useState<ProductSet[]>([]);
-  // 로딩 상태
+  const [searchTerm, setSearchTerm] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState<string>("전체");
+  const [typeFilter, setTypeFilter] = useState<string>("전체");
+  const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
+  const [data, setData] = useState<PriceItem[]>([]);
   const [loading, setLoading] = useState(true);
-  // 펼쳐진 SET의 id 목록
-  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
-  // 현재 편집 중인 부품 id
-  const [editingId, setEditingId] = useState<string | null>(null);
-  // 편집 중인 값 임시 저장
-  const [editPrice, setEditPrice] = useState(0);
-  // 저장 중 표시
-  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  // 페이지 로드 시 DB에서 데이터 가져오기
+  // 수정 모달 상태
+  const [editingSet, setEditingSet] = useState<ProductSet | null>(null);
+  const [editingPart, setEditingPart] = useState<Product | null>(null);
+  const [isEditMode, setIsEditMode] = useState(false);
+
+  // 토스트 상태
+  const [toast, setToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
+
+  // 추가 모달 상태
+  const [showAddSet, setShowAddSet] = useState(false);
+  const [addPartForSet, setAddPartForSet] = useState<{ id: string; name: string } | null>(null);
+
+  // 삭제 확인 모달 상태
+  const [deleteConfirm, setDeleteConfirm] = useState<{
+    type: "set" | "part";
+    id: string;
+    name: string;
+  } | null>(null);
+
+  const showToast = (message: string, type: "success" | "error" = "success") => {
+    setToast({ message, type });
+  };
+
+  // 데이터 로드 함수
+  const fetchData = async () => {
+    try {
+      setLoading(true);
+      const supabase = createClient();
+
+      const { data: sets, error: setsError } = await supabase
+        .from("product_sets")
+        .select("*")
+        .order("sort_order");
+
+      if (setsError) throw setsError;
+
+      const { data: products, error: productsError } = await supabase
+        .from("products")
+        .select("*")
+        .order("sort_order");
+
+      if (productsError) throw productsError;
+
+      const priceItems: PriceItem[] = (sets as ProductSet[]).map((set) => {
+        const rawParts = (products as Product[]).filter((p) => p.set_id === set.id);
+        const setParts = rawParts.map((p) => ({
+          id: p.id,
+          품목명: p.part_name,
+          모델명: p.model_name,
+          출고가: p.factory_price,
+          DC율: p.dc_rate,
+          판매가: p.sale_price,
+          is_material: p.is_material,
+          _raw: p,
+        }));
+
+        return {
+          id: set.id,
+          구분: set.category,
+          타입: set.cooling_type,
+          품목명: set.set_name,
+          모델명: set.set_model,
+          출고가: set.factory_price,
+          DC율: set.dc_rate,
+          판매가: set.sale_price,
+          비고: set.note || "",
+          구성품: setParts,
+          _raw: set,
+          _rawParts: rawParts,
+        };
+      });
+
+      setData(priceItems);
+      setError(null);
+    } catch (err) {
+      console.error("데이터 로드 실패:", err);
+      setError("데이터를 불러오는데 실패했습니다.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
-    loadData();
+    fetchData();
   }, []);
 
-  async function loadData() {
-    setLoading(true);
-    const data = await getProductSets();
-    setSets(data);
-    setLoading(false);
-  }
+  // 카테고리 목록
+  const categories = ["전체", ...new Set(data.map(item => item.구분).filter(Boolean))];
+  const types = ["전체", ...new Set(data.map(item => item.타입).filter(Boolean))];
 
-  // SET 펼치기/접기 토글
-  function toggleExpand(setId: string) {
-    setExpandedIds((prev) => {
+  const categoryDisplayName: Record<string, string> = {
+    "전체": "전체",
+    "벽걸이형": "RAC",
+    "스탠드형": "스탠드",
+    "천장형": "천장형",
+    "시스템": "시스템",
+    "투인원": "투인원",
+    "FAC": "FAC",
+  };
+
+  // 필터링
+  const filteredData = data.filter(item => {
+    const matchesSearch =
+      item.품목명.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      item.모델명.toLowerCase().includes(searchTerm.toLowerCase());
+    const matchesCategory =
+      categoryFilter === "전체" || item.구분 === categoryFilter;
+    const matchesType =
+      typeFilter === "전체" || item.타입 === typeFilter;
+    return matchesSearch && matchesCategory && matchesType;
+  });
+
+  // 아코디언 토글
+  const toggleRow = (id: string) => {
+    if (isEditMode) return; // 수정 모드에서는 아코디언 토글 안함
+    setExpandedRows(prev => {
       const next = new Set(prev);
-      if (next.has(setId)) {
-        next.delete(setId);
+      if (next.has(id)) {
+        next.delete(id);
       } else {
-        next.add(setId);
+        next.add(id);
       }
       return next;
     });
-  }
+  };
 
   // 전체 펼치기/접기
-  function toggleAll() {
-    if (expandedIds.size === sets.length) {
-      // 전부 펼쳐져 있으면 → 전부 접기
-      setExpandedIds(new Set());
+  const toggleAll = () => {
+    if (expandedRows.size === filteredData.length) {
+      setExpandedRows(new Set());
     } else {
-      // 아니면 → 전부 펼치기
-      setExpandedIds(new Set(sets.map((s) => s.id)));
+      setExpandedRows(new Set(filteredData.map(item => item.id)));
     }
-  }
+  };
 
-  // 부품 출고가 수정 시작
-  function startEdit(product: Product) {
-    setEditingId(product.id);
-    setEditPrice(product.base_price);
-  }
+  // SET 삭제 실행
+  const executeDeleteSet = async (setId: string) => {
+    try {
+      const supabase = createClient();
+      const { error } = await supabase
+        .from("product_sets")
+        .delete()
+        .eq("id", setId);
 
-  // 수정 저장 → DB 업데이트
-  async function saveEdit(productId: string) {
-    setSaving(true);
-    const success = await updateProductPrice(productId, editPrice);
-    if (success) {
-      // DB에서 최신 데이터 다시 불러오기 (합계도 업데이트됨)
-      await loadData();
+      if (error) throw error;
+      fetchData();
+      showToast("삭제 완료!");
+    } catch (err) {
+      console.error("삭제 실패:", err);
+      showToast("삭제에 실패했습니다.", "error");
+    }
+  };
+
+  // 구성품 삭제 실행
+  const executeDeletePart = async (partId: string) => {
+    try {
+      const supabase = createClient();
+      const { error } = await supabase
+        .from("products")
+        .delete()
+        .eq("id", partId);
+
+      if (error) throw error;
+      fetchData();
+      showToast("삭제 완료!");
+    } catch (err) {
+      console.error("삭제 실패:", err);
+      showToast("삭제에 실패했습니다.", "error");
+    }
+  };
+
+  // 삭제 확인 후 실행
+  const handleConfirmDelete = () => {
+    if (!deleteConfirm) return;
+
+    if (deleteConfirm.type === "set") {
+      executeDeleteSet(deleteConfirm.id);
     } else {
-      alert("저장에 실패했습니다. 다시 시도해주세요.");
+      executeDeletePart(deleteConfirm.id);
     }
-    setEditingId(null);
-    setSaving(false);
-  }
+    setDeleteConfirm(null);
+  };
 
-  // 수정 취소
-  function cancelEdit() {
-    setEditingId(null);
-  }
-
-  // 엑셀 업로드 (UI만)
-  function handleExcelUpload() {
-    alert("엑셀 업로드 기능은 추후 구현 예정입니다.\n(SheetJS 연동 후 사용 가능)");
-  }
-
-  // 카테고리별 뱃지 색상
-  function categoryBadge(category: string) {
-    const colors: Record<string, string> = {
-      "벽걸이": "bg-blue-100 text-blue-800",
-      "홈멀티": "bg-cyan-100 text-cyan-800",
-      "스탠드": "bg-green-100 text-green-800",
-      "천장형": "bg-purple-100 text-purple-800",
-      "시스템": "bg-orange-100 text-orange-800",
-    };
-    return (
-      <Badge variant="outline" className={colors[category] || ""}>
-        {category}
-      </Badge>
-    );
-  }
-
-  // 냉방/냉난방 뱃지
-  function coolingBadge(coolingType: string) {
-    return coolingType === "냉방" ? (
-      <Badge variant="outline" className="bg-sky-50 text-sky-700">냉방</Badge>
-    ) : (
-      <Badge variant="outline" className="bg-red-50 text-red-700">냉난방</Badge>
-    );
-  }
-
-  // 통계 계산
-  const totalSets = sets.length;
-  const totalProducts = sets.reduce(
-    (sum, s) => sum + (s.products?.length || 0),
-    0
-  );
-  const categories = new Set(sets.map((s) => s.category)).size;
-
-  // 로딩 중 표시
+  // 로딩 상태
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-64">
-        <div className="text-center">
-          <div className="text-lg font-medium">데이터를 불러오는 중...</div>
-          <p className="text-sm text-muted-foreground mt-1">
-            Supabase에서 SET 상품 데이터를 가져오고 있습니다
-          </p>
+      <div className="flex items-center justify-center min-h-[400px]">
+        <div className="text-center space-y-4">
+          <Loader2 className="w-12 h-12 mx-auto animate-spin text-blue-500" />
+          <p className="text-gray-500">데이터를 불러오는 중...</p>
         </div>
       </div>
     );
   }
 
-  // 데이터 없음 표시
-  if (sets.length === 0) {
+  // 에러 상태
+  if (error) {
     return (
-      <div className="flex items-center justify-center h-64">
-        <div className="text-center">
-          <div className="text-lg font-medium">데이터가 없습니다</div>
-          <p className="text-sm text-muted-foreground mt-1">
-            Supabase에서 테이블을 만들고 데이터를 삽입해주세요.
-          </p>
-          <p className="text-sm text-muted-foreground">
-            supabase/001_create_tables.sql → 002_insert_data.sql 순서로 실행
-          </p>
+      <div className="space-y-6">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent">
+            삼성 출고가
+          </h1>
+        </div>
+        <div className="bg-red-50 border border-red-200 rounded-xl p-6 text-center">
+          <p className="text-red-600 font-medium mb-2">데이터 로드 실패</p>
+          <p className="text-red-500 text-sm mb-4">{error}</p>
+          <div className="text-left bg-white rounded-lg p-4 border border-red-100 max-w-xl mx-auto">
+            <p className="text-sm text-gray-600 mb-2">다음 SQL 파일을 Supabase SQL Editor에서 실행하세요:</p>
+            <ol className="text-sm text-gray-500 list-decimal list-inside space-y-1">
+              <li><code className="bg-gray-100 px-1 rounded">supabase/004_new_schema.sql</code></li>
+              <li><code className="bg-gray-100 px-1 rounded">supabase/005_insert_data.sql</code></li>
+            </ol>
+          </div>
         </div>
       </div>
     );
   }
 
   return (
-    <div>
-      {/* 페이지 제목 + 버튼들 */}
-      <div className="flex items-center justify-between mb-6">
+    <div className="space-y-6">
+      {/* 토스트 알림 */}
+      {toast && (
+        <Toast
+          message={toast.message}
+          type={toast.type}
+          onClose={() => setToast(null)}
+        />
+      )}
+
+      {/* 수정 모달 */}
+      {editingSet && (
+        <EditSetModal
+          set={editingSet}
+          onClose={() => setEditingSet(null)}
+          onSave={() => {
+            fetchData();
+            showToast("수정 완료!");
+          }}
+        />
+      )}
+      {editingPart && (
+        <EditPartModal
+          part={editingPart}
+          onClose={() => setEditingPart(null)}
+          onSave={() => {
+            fetchData();
+            showToast("수정 완료!");
+          }}
+        />
+      )}
+
+      {/* 추가 모달 */}
+      {showAddSet && (
+        <AddSetModal
+          onClose={() => setShowAddSet(false)}
+          onSave={() => {
+            fetchData();
+            showToast("SET 상품 추가 완료!");
+          }}
+        />
+      )}
+      {addPartForSet && (
+        <AddPartModal
+          setId={addPartForSet.id}
+          setName={addPartForSet.name}
+          onClose={() => setAddPartForSet(null)}
+          onSave={() => {
+            fetchData();
+            showToast("구성품 추가 완료!");
+          }}
+        />
+      )}
+
+      {/* 삭제 확인 모달 */}
+      {deleteConfirm && (
+        <ConfirmModal
+          title={deleteConfirm.type === "set" ? "SET 상품 삭제" : "구성품 삭제"}
+          message={
+            deleteConfirm.type === "set"
+              ? `"${deleteConfirm.name}"과(와) 모든 구성품이 삭제됩니다. 삭제하시겠습니까?`
+              : `"${deleteConfirm.name}"을(를) 삭제하시겠습니까?`
+          }
+          confirmText="삭제"
+          cancelText="취소"
+          type="danger"
+          onConfirm={handleConfirmDelete}
+          onCancel={() => setDeleteConfirm(null)}
+        />
+      )}
+
+      {/* 페이지 헤더 */}
+      <div className="flex items-end justify-between">
         <div>
-          <h1 className="text-2xl font-bold">삼성 출고가 관리</h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            SET 상품별 부품 출고가 관리 (부가세 포함)
+          <h1 className="text-3xl font-bold tracking-tight bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent">
+            삼성 출고가
+          </h1>
+          <p className="text-muted-foreground mt-1">
+            2026. 02. 01. 기준 · 부가세 포함
           </p>
         </div>
-        <div className="flex gap-2">
-          <Button variant="outline" onClick={toggleAll}>
-            {expandedIds.size === sets.length ? "전체 접기" : "전체 펼치기"}
-          </Button>
-          <Button variant="outline" onClick={handleExcelUpload}>
-            엑셀 업로드
-          </Button>
+        <div className="flex items-center gap-2">
+          {/* SET 추가 버튼 */}
+          {isEditMode && (
+            <button
+              onClick={() => setShowAddSet(true)}
+              className="px-4 py-2 text-sm font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-all shadow-md flex items-center gap-2"
+            >
+              <Plus className="w-4 h-4" />
+              SET 추가
+            </button>
+          )}
+          {/* 수정 모드 토글 */}
+          <button
+            onClick={() => setIsEditMode(!isEditMode)}
+            className={`px-4 py-2 text-sm font-medium rounded-lg transition-all flex items-center gap-2 ${
+              isEditMode
+                ? "bg-amber-500 text-white shadow-md shadow-amber-200"
+                : "bg-white border border-gray-200 hover:bg-gray-50 hover:border-gray-300 shadow-sm"
+            }`}
+          >
+            <Pencil className="w-4 h-4" />
+            {isEditMode ? "수정 완료" : "수정 모드"}
+          </button>
+          <button
+            onClick={toggleAll}
+            className="px-4 py-2 text-sm font-medium bg-white border border-gray-200 hover:bg-gray-50 hover:border-gray-300 rounded-lg transition-all shadow-sm"
+          >
+            {expandedRows.size === filteredData.length ? "전체 접기" : "전체 펼치기"}
+          </button>
         </div>
       </div>
 
-      {/* 요약 카드 */}
-      <div className="grid grid-cols-3 gap-4 mb-6">
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm text-muted-foreground">
-              SET 상품 수
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{totalSets}개</div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm text-muted-foreground">
-              전체 부품 수
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{totalProducts}개</div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardTitle className="text-sm text-muted-foreground">
-              카테고리 수
-            </CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">{categories}개</div>
-          </CardContent>
-        </Card>
+      {/* 수정 모드 안내 */}
+      {isEditMode && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 flex items-center gap-3">
+          <Pencil className="w-5 h-5 text-amber-600" />
+          <div>
+            <p className="text-amber-800 font-medium">수정 모드가 활성화되었습니다</p>
+            <p className="text-amber-600 text-sm">각 행의 수정/삭제 버튼을 클릭하여 데이터를 변경할 수 있습니다.</p>
+          </div>
+        </div>
+      )}
+
+      {/* 필터 영역 */}
+      <div className="bg-white rounded-xl border border-gray-200 p-4 shadow-sm space-y-4">
+        <div className="flex items-center gap-2 text-sm font-medium text-gray-500">
+          <ListFilter className="w-4 h-4" />
+          필터
+        </div>
+
+        <div className="flex flex-wrap items-center gap-4">
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+            <Input
+              placeholder="품목 또는 모델명 검색..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="pl-9 w-64 bg-gray-50 border-gray-200 focus:bg-white transition-colors"
+            />
+          </div>
+
+          <div className="h-8 w-px bg-gray-200" />
+
+          <div className="flex gap-1.5">
+            {categories.map(cat => (
+              <button
+                key={cat}
+                onClick={() => setCategoryFilter(cat)}
+                className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
+                  categoryFilter === cat
+                    ? "bg-gray-900 text-white shadow-md"
+                    : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                }`}
+              >
+                {categoryDisplayName[cat] || cat}
+              </button>
+            ))}
+          </div>
+
+          <div className="h-8 w-px bg-gray-200" />
+
+          <div className="flex gap-1.5">
+            {types.map(type => (
+              <button
+                key={type}
+                onClick={() => setTypeFilter(type)}
+                className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
+                  typeFilter === type
+                    ? type === "냉방"
+                      ? "bg-sky-500 text-white shadow-md shadow-sky-200"
+                      : type === "냉난방"
+                      ? "bg-rose-500 text-white shadow-md shadow-rose-200"
+                      : "bg-gray-900 text-white shadow-md"
+                    : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+                }`}
+              >
+                {type}
+              </button>
+            ))}
+          </div>
+
+          <div className="ml-auto text-sm text-gray-500">
+            <span className="font-semibold text-gray-900">{filteredData.length}</span>개 상품
+          </div>
+        </div>
       </div>
 
-      {/* SET 상품 목록 테이블 */}
-      <div className="border rounded-lg">
+      {/* 가격표 테이블 */}
+      <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
         <Table>
           <TableHeader>
-            <TableRow>
-              <TableHead className="w-10"></TableHead>
-              <TableHead>카테고리</TableHead>
-              <TableHead>SET 이름</TableHead>
-              <TableHead>SET 모델</TableHead>
-              <TableHead>타입</TableHead>
-              <TableHead className="text-right">출고가 합계</TableHead>
-              <TableHead>비고</TableHead>
+            <TableRow className="bg-gray-50/80 border-b border-gray-200">
+              <TableHead className="w-12"></TableHead>
+              <TableHead className="w-28 font-semibold text-gray-600">구분</TableHead>
+              <TableHead className="font-semibold text-gray-600">품목명</TableHead>
+              <TableHead className="font-semibold text-gray-600">모델명</TableHead>
+              <TableHead className="text-right font-semibold text-gray-600">출고가</TableHead>
+              <TableHead className="w-20 text-right font-semibold text-gray-600">DC</TableHead>
+              <TableHead className="text-right font-semibold text-gray-600">판매가</TableHead>
+              <TableHead className={`font-semibold text-gray-600 ${isEditMode ? "w-40" : "w-32"}`}>
+                {isEditMode ? "관리" : "비고"}
+              </TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
-            {sets.map((set) => {
-              const isExpanded = expandedIds.has(set.id);
+            {filteredData.map((item) => {
+              const isExpanded = expandedRows.has(item.id);
               return (
-                <SetRow
-                  key={set.id}
-                  set={set}
+                <ProductRow
+                  key={item.id}
+                  item={item}
                   isExpanded={isExpanded}
-                  onToggle={() => toggleExpand(set.id)}
-                  editingId={editingId}
-                  editPrice={editPrice}
-                  saving={saving}
-                  onEditPriceChange={setEditPrice}
-                  onStartEdit={startEdit}
-                  onSaveEdit={saveEdit}
-                  onCancelEdit={cancelEdit}
-                  categoryBadge={categoryBadge}
-                  coolingBadge={coolingBadge}
+                  isEditMode={isEditMode}
+                  onToggle={() => toggleRow(item.id)}
+                  onEditSet={() => setEditingSet(item._raw)}
+                  onDeleteSet={() => setDeleteConfirm({ type: "set", id: item.id, name: item.품목명 })}
+                  onEditPart={(part) => setEditingPart(part)}
+                  onDeletePart={(partId, partName) => setDeleteConfirm({ type: "part", id: partId, name: partName })}
+                  onAddPart={() => setAddPartForSet({ id: item.id, name: item.품목명 })}
                 />
               );
             })}
           </TableBody>
         </Table>
+
+        {filteredData.length === 0 && (
+          <div className="text-center py-16 text-gray-400">
+            <Search className="w-12 h-12 mx-auto mb-4 opacity-50" />
+            <p className="text-lg font-medium">검색 결과가 없습니다</p>
+            <p className="text-sm mt-1">다른 검색어나 필터를 시도해보세요</p>
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
-// ────────────────────────────────────────
-// SET 행 + 부품 행 컴포넌트
-// ────────────────────────────────────────
-function SetRow({
-  set,
+// 제품 행 컴포넌트
+function ProductRow({
+  item,
   isExpanded,
+  isEditMode,
   onToggle,
-  editingId,
-  editPrice,
-  saving,
-  onEditPriceChange,
-  onStartEdit,
-  onSaveEdit,
-  onCancelEdit,
-  categoryBadge,
-  coolingBadge,
+  onEditSet,
+  onDeleteSet,
+  onEditPart,
+  onDeletePart,
+  onAddPart,
 }: {
-  set: ProductSet;
+  item: PriceItem;
   isExpanded: boolean;
+  isEditMode: boolean;
   onToggle: () => void;
-  editingId: string | null;
-  editPrice: number;
-  saving: boolean;
-  onEditPriceChange: (price: number) => void;
-  onStartEdit: (product: Product) => void;
-  onSaveEdit: (productId: string) => Promise<void>;
-  onCancelEdit: () => void;
-  categoryBadge: (cat: string) => React.ReactNode;
-  coolingBadge: (type: string) => React.ReactNode;
+  onEditSet: () => void;
+  onDeleteSet: () => void;
+  onEditPart: (part: Product) => void;
+  onDeletePart: (partId: string, partName: string) => void;
+  onAddPart: () => void;
 }) {
-  const products = set.products || [];
+  const [includeMaterial, setIncludeMaterial] = useState(false);
+
+  const parts = item.구성품 || [];
+  const baseParts = parts.filter(p => !p.is_material);
+  const materialParts = parts.filter(p => p.is_material);
+  const activeParts = includeMaterial ? parts : baseParts;
+  const totalOut = activeParts.reduce((sum, p) => sum + p.출고가, 0);
+  const totalSale = activeParts.reduce((sum, p) => sum + p.판매가, 0);
 
   return (
     <>
-      {/* SET 행 (클릭하면 펼침/접힘) */}
+      {/* 메인 행 (SET) */}
       <TableRow
-        className="cursor-pointer hover:bg-muted/50"
+        className={`transition-colors ${
+          isEditMode
+            ? "hover:bg-amber-50/50"
+            : isExpanded
+            ? "bg-blue-50/50 hover:bg-blue-50"
+            : "hover:bg-gray-50"
+        } ${!isEditMode && "cursor-pointer"}`}
         onClick={onToggle}
       >
         <TableCell className="text-center">
-          <span className="text-lg">{isExpanded ? "▼" : "▶"}</span>
+          {parts.length > 0 && !isEditMode ? (
+            <div className={`inline-flex items-center justify-center w-6 h-6 rounded-md transition-colors ${
+              isExpanded ? "bg-blue-100 text-blue-600" : "bg-gray-100 text-gray-500"
+            }`}>
+              {isExpanded ? (
+                <ChevronDown className="w-4 h-4" />
+              ) : (
+                <ChevronRight className="w-4 h-4" />
+              )}
+            </div>
+          ) : null}
         </TableCell>
-        <TableCell>{categoryBadge(set.category)}</TableCell>
-        <TableCell className="font-medium">{set.set_name}</TableCell>
-        <TableCell className="font-mono text-sm text-muted-foreground">
-          {set.set_model}
+        <TableCell>
+          <div className="flex items-center gap-1.5">
+            <CategoryBadge category={item.구분} />
+            <TypeBadge type={item.타입} />
+          </div>
         </TableCell>
-        <TableCell>{coolingBadge(set.cooling_type)}</TableCell>
-        <TableCell className="text-right font-bold">
-          {formatPrice(set.total_price)}
+        <TableCell className="font-semibold text-gray-900">
+          {item.품목명}
         </TableCell>
-        <TableCell className="text-sm text-muted-foreground">
-          {set.note || ""}
+        <TableCell className="font-mono text-sm font-semibold text-blue-600">
+          {item.모델명}
+        </TableCell>
+        <TableCell className="text-right font-bold text-gray-900 tabular-nums">
+          {formatPrice(item.출고가)}
+        </TableCell>
+        <TableCell className="text-right text-gray-500 tabular-nums">
+          {item.출고가 > 0
+            ? ((1 - item.판매가 / item.출고가) * 100).toFixed(2)
+            : item.DC율.toFixed(2)}%
+        </TableCell>
+        <TableCell className="text-right font-bold text-blue-600 tabular-nums">
+          {formatPrice(item.판매가)}
+        </TableCell>
+        <TableCell>
+          {isEditMode ? (
+            <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
+              <button
+                onClick={onEditSet}
+                className="p-1.5 text-blue-600 hover:bg-blue-100 rounded-md transition-colors"
+                title="수정"
+              >
+                <Pencil className="w-4 h-4" />
+              </button>
+              <button
+                onClick={onDeleteSet}
+                className="p-1.5 text-red-600 hover:bg-red-100 rounded-md transition-colors"
+                title="삭제"
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
+            </div>
+          ) : (
+            <span className="text-sm text-gray-500">{item.비고}</span>
+          )}
         </TableCell>
       </TableRow>
 
-      {/* 부품 행 (펼쳤을 때만 표시) */}
-      {isExpanded &&
-        products.map((product, idx) => (
-          <TableRow
-            key={product.id}
-            className="bg-muted/30"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <TableCell></TableCell>
-            <TableCell className="pl-8 text-muted-foreground">
-              {idx === products.length - 1 ? "└" : "├"}
-            </TableCell>
-            <TableCell className="text-sm">
-              <span className="text-muted-foreground mr-2">
-                {product.product_type}
-              </span>
-              {product.quantity > 1 && (
-                <Badge variant="secondary" className="mr-1 text-xs">
-                  x{product.quantity}
-                </Badge>
-              )}
-            </TableCell>
-            <TableCell className="font-mono text-sm">
-              {product.model_name}
-            </TableCell>
-            <TableCell></TableCell>
-            <TableCell className="text-right">
-              {editingId === product.id ? (
-                <Input
-                  type="number"
-                  className="w-32 ml-auto text-right"
-                  value={editPrice}
-                  onChange={(e) => onEditPriceChange(Number(e.target.value))}
-                  onClick={(e) => e.stopPropagation()}
-                />
-              ) : (
-                <span className="text-sm">
-                  {formatPrice(product.base_price)}
-                  {product.quantity > 1 && (
-                    <span className="text-muted-foreground ml-1">
-                      (소계: {formatPrice(product.base_price * product.quantity)})
-                    </span>
-                  )}
+      {/* 구성품 행 - 기본 구성품 */}
+      {isExpanded && baseParts.map((part, idx) => (
+        <TableRow key={part.id} className="bg-gray-50/50 hover:bg-gray-100/50">
+          <TableCell className="text-center">
+            <span className="text-gray-300 text-xs font-mono">
+              {idx === baseParts.length - 1 && materialParts.length === 0 ? "└" : "├"}
+            </span>
+          </TableCell>
+          <TableCell>
+            <PartTypeBadge name={part.품목명} />
+          </TableCell>
+          <TableCell className="text-sm text-gray-500">
+            {part.품목명}
+          </TableCell>
+          <TableCell className="font-mono text-xs text-gray-400">
+            {part.모델명}
+          </TableCell>
+          <TableCell className="text-right text-sm text-gray-500 tabular-nums">
+            {formatPrice(part.출고가)}
+          </TableCell>
+          <TableCell className="text-right text-sm text-gray-400 tabular-nums">
+            {part.출고가 > 0
+              ? ((1 - part.판매가 / part.출고가) * 100).toFixed(2)
+              : part.DC율.toFixed(2)}%
+          </TableCell>
+          <TableCell className="text-right text-sm font-medium text-blue-500 tabular-nums">
+            {formatPrice(part.판매가)}
+          </TableCell>
+          <TableCell>
+            {isEditMode && (
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => onEditPart(part._raw)}
+                  className="p-1.5 text-blue-600 hover:bg-blue-100 rounded-md transition-colors"
+                  title="수정"
+                >
+                  <Pencil className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  onClick={() => onDeletePart(part.id, part.품목명)}
+                  className="p-1.5 text-red-600 hover:bg-red-100 rounded-md transition-colors"
+                  title="삭제"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+          </TableCell>
+        </TableRow>
+      ))}
+
+      {/* 구성품 행 - 자재박스 */}
+      {isExpanded && materialParts.map((part, idx) => (
+        <TableRow
+          key={part.id}
+          className={`transition-opacity ${
+            includeMaterial
+              ? "bg-amber-50/50 hover:bg-amber-100/50"
+              : "bg-gray-50/30 opacity-40"
+          }`}
+        >
+          <TableCell className="text-center">
+            <span className="text-gray-300 text-xs font-mono">
+              {idx === materialParts.length - 1 ? "└" : "├"}
+            </span>
+          </TableCell>
+          <TableCell>
+            <PartTypeBadge name={part.품목명} />
+          </TableCell>
+          <TableCell className={`text-sm text-gray-500 ${!includeMaterial ? "line-through decoration-gray-400" : ""}`}>
+            {part.품목명}
+          </TableCell>
+          <TableCell className={`font-mono text-xs text-gray-400 ${!includeMaterial ? "line-through decoration-gray-400" : ""}`}>
+            {part.모델명}
+          </TableCell>
+          <TableCell className={`text-right text-sm text-gray-500 tabular-nums ${!includeMaterial ? "line-through decoration-gray-400" : ""}`}>
+            {formatPrice(part.출고가)}
+          </TableCell>
+          <TableCell className={`text-right text-sm text-gray-400 tabular-nums ${!includeMaterial ? "line-through decoration-gray-400" : ""}`}>
+            {part.출고가 > 0
+              ? ((1 - part.판매가 / part.출고가) * 100).toFixed(2)
+              : part.DC율.toFixed(2)}%
+          </TableCell>
+          <TableCell className={`text-right text-sm font-medium text-blue-500 tabular-nums ${!includeMaterial ? "line-through decoration-gray-400" : ""}`}>
+            {formatPrice(part.판매가)}
+          </TableCell>
+          <TableCell>
+            {isEditMode && (
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => onEditPart(part._raw)}
+                  className="p-1.5 text-blue-600 hover:bg-blue-100 rounded-md transition-colors"
+                  title="수정"
+                >
+                  <Pencil className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  onClick={() => onDeletePart(part.id, part.품목명)}
+                  className="p-1.5 text-red-600 hover:bg-red-100 rounded-md transition-colors"
+                  title="삭제"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+          </TableCell>
+        </TableRow>
+      ))}
+
+      {/* 합계 행 */}
+      {isExpanded && (
+        <TableRow className="bg-gradient-to-r from-gray-100 to-gray-50 border-b-2 border-gray-200">
+          <TableCell></TableCell>
+          <TableCell colSpan={2}>
+            <div className="flex items-center gap-4">
+              {parts.length > 0 && (
+                <span className="text-sm font-semibold text-gray-700">
+                  합계 <span className="text-gray-400 font-normal">({activeParts.length}개)</span>
                 </span>
               )}
-            </TableCell>
-            <TableCell>
-              {editingId === product.id ? (
-                <div className="flex gap-1">
-                  <Button
-                    size="sm"
-                    onClick={() => onSaveEdit(product.id)}
-                    disabled={saving}
-                  >
-                    {saving ? "저장중..." : "저장"}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={onCancelEdit}
-                    disabled={saving}
-                  >
-                    취소
-                  </Button>
-                </div>
-              ) : (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => onStartEdit(product)}
+              {materialParts.length > 0 && (
+                <label
+                  className="flex items-center gap-2 cursor-pointer group"
+                  onClick={(e) => e.stopPropagation()}
                 >
-                  수정
-                </Button>
+                  <input
+                    type="checkbox"
+                    checked={includeMaterial}
+                    onChange={(e) => setIncludeMaterial(e.target.checked)}
+                    className="w-4 h-4 rounded border-gray-300 text-amber-500 focus:ring-amber-500 cursor-pointer"
+                  />
+                  <span className={`text-xs transition-colors ${
+                    includeMaterial
+                      ? "text-amber-600 font-medium"
+                      : "text-gray-400 group-hover:text-gray-600"
+                  }`}>
+                    자재박스 포함
+                  </span>
+                </label>
               )}
-            </TableCell>
-          </TableRow>
-        ))}
+              {isEditMode && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onAddPart();
+                  }}
+                  className="px-3 py-1 text-xs font-medium bg-emerald-100 text-emerald-700 hover:bg-emerald-200 rounded-md transition-colors flex items-center gap-1"
+                >
+                  <Plus className="w-3 h-3" />
+                  구성품 추가
+                </button>
+              )}
+            </div>
+          </TableCell>
+          <TableCell></TableCell>
+          <TableCell className="text-right font-bold text-gray-900 tabular-nums">
+            {parts.length > 0 ? formatPrice(totalOut) : "-"}
+          </TableCell>
+          <TableCell></TableCell>
+          <TableCell className="text-right font-bold text-blue-600 tabular-nums">
+            {parts.length > 0 ? formatPrice(totalSale) : "-"}
+          </TableCell>
+          <TableCell></TableCell>
+        </TableRow>
+      )}
     </>
+  );
+}
+
+// 카테고리 뱃지
+function CategoryBadge({ category }: { category: string }) {
+  const styles: Record<string, string> = {
+    "벽걸이형": "bg-blue-100 text-blue-700 border-blue-200",
+    "스탠드형": "bg-emerald-100 text-emerald-700 border-emerald-200",
+    "천장형": "bg-violet-100 text-violet-700 border-violet-200",
+    "시스템": "bg-orange-100 text-orange-700 border-orange-200",
+    "투인원": "bg-pink-100 text-pink-700 border-pink-200",
+    "FAC": "bg-cyan-100 text-cyan-700 border-cyan-200",
+  };
+
+  const displayName: Record<string, string> = {
+    "벽걸이형": "RAC",
+    "스탠드형": "스탠드",
+    "천장형": "천장형",
+    "시스템": "시스템",
+    "투인원": "투인원",
+    "FAC": "FAC",
+  };
+
+  return (
+    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold border ${
+      styles[category] || "bg-gray-100 text-gray-700 border-gray-200"
+    }`}>
+      {displayName[category] || category}
+    </span>
+  );
+}
+
+// 냉방/냉난방 뱃지
+function TypeBadge({ type }: { type: string }) {
+  return type === "냉방" ? (
+    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-sky-100 text-sky-700 border border-sky-200">
+      냉방
+    </span>
+  ) : (
+    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-rose-100 text-rose-700 border border-rose-200">
+      냉난방
+    </span>
+  );
+}
+
+// 부품 타입 뱃지
+function PartTypeBadge({ name }: { name: string }) {
+  let type = "기타";
+  let style = "bg-gray-100 text-gray-600";
+
+  if (name.includes("실내기")) {
+    type = "실내기";
+    style = "bg-teal-100 text-teal-700";
+  } else if (name.includes("실외기")) {
+    type = "실외기";
+    style = "bg-orange-100 text-orange-700";
+  } else if (name.includes("리모컨")) {
+    type = "리모컨";
+    style = "bg-purple-100 text-purple-700";
+  } else if (name.includes("자재박스") || name.includes("배관")) {
+    type = "자재";
+    style = "bg-slate-200 text-slate-600";
+  }
+
+  return (
+    <span className={`inline-flex items-center justify-center w-14 px-2 py-0.5 rounded text-xs font-medium ${style}`}>
+      {type}
+    </span>
   );
 }
