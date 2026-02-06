@@ -1,65 +1,98 @@
-import Image from "next/image";
+// ============================================
+// 로그인 페이지 (메인 페이지)
+// → 사이트에 처음 접속하면 보이는 화면
+// → 관리자/업체 모두 여기서 로그인
+// ============================================
 
-export default function Home() {
+"use client";
+
+import { useState } from "react";
+import { useRouter } from "next/navigation";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+
+export default function LoginPage() {
+  const router = useRouter();
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  // 로그인 버튼 클릭 시 실행
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault(); // 페이지 새로고침 방지
+    setError("");
+    setLoading(true);
+
+    // TODO: Supabase 연결 후 실제 로그인으로 교체
+    // 지금은 테스트용으로 임시 동작
+    if (email === "admin@melea.kr" && password === "admin123") {
+      router.push("/admin/dashboard");
+    } else if (email === "dealer@test.kr" && password === "dealer123") {
+      router.push("/dealer/prices");
+    } else {
+      setError("이메일 또는 비밀번호가 올바르지 않습니다.");
+    }
+
+    setLoading(false);
+  };
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
+    <div className="min-h-screen flex items-center justify-center bg-muted/50">
+      <Card className="w-full max-w-md">
+        <CardHeader className="text-center">
+          <CardTitle className="text-2xl">멜레아 B2B</CardTitle>
+          <CardDescription>유통 관리 시스템에 로그인하세요</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={handleLogin} className="space-y-4">
+            {/* 이메일 입력 */}
+            <div className="space-y-2">
+              <Label htmlFor="email">이메일</Label>
+              <Input
+                id="email"
+                type="email"
+                placeholder="example@company.kr"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                required
+              />
+            </div>
+
+            {/* 비밀번호 입력 */}
+            <div className="space-y-2">
+              <Label htmlFor="password">비밀번호</Label>
+              <Input
+                id="password"
+                type="password"
+                placeholder="비밀번호 입력"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
+              />
+            </div>
+
+            {/* 에러 메시지 */}
+            {error && (
+              <p className="text-sm text-destructive">{error}</p>
+            )}
+
+            {/* 로그인 버튼 */}
+            <Button type="submit" className="w-full" disabled={loading}>
+              {loading ? "로그인 중..." : "로그인"}
+            </Button>
+          </form>
+
+          {/* 테스트용 안내 (나중에 삭제) */}
+          <div className="mt-6 p-3 bg-muted rounded-lg text-xs text-muted-foreground">
+            <p className="font-medium mb-1">테스트 계정:</p>
+            <p>관리자: admin@melea.kr / admin123</p>
+            <p>업체: dealer@test.kr / dealer123</p>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   );
 }
